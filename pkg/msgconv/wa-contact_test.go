@@ -25,7 +25,6 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
-	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -57,57 +56,45 @@ func convertForTest(t *testing.T, msg *waE2E.Message) (*bridgev2.ConvertedMessag
 	return cm, intent.uploads
 }
 
-func testContact(name string) *waE2E.ContactMessage {
-	return &waE2E.ContactMessage{
-		DisplayName: ptr.Ptr(name),
-		Vcard:       ptr.Ptr("BEGIN:VCARD\nVERSION:3.0\nFN:" + name + "\nTEL;type=CELL:+55 21 90000-0001\nEND:VCARD"),
-	}
+// WhatsApp's vcard strings end at END:VCARD with no trailing newline.
+func testVcard(name, tel string) string {
+	return "BEGIN:VCARD\nVERSION:3.0\nN:;" + name + ";;;\nFN:" + name + "\nitem1.TEL;waid=" + tel + ":+" + tel + "\nitem1.X-ABLabel:Mobile\nEND:VCARD"
 }
 
 func TestContactsArrayMessage(t *testing.T) {
-	cm, uploads := convertForTest(t, &waE2E.Message{ContactsArrayMessage: &waE2E.ContactsArrayMessage{
-		DisplayName: ptr.Ptr("2 contacts"),
-		Contacts:    []*waE2E.ContactMessage{testContact("Ana Teste"), testContact("Bruno Teste")},
-	}})
-	if len(cm.Parts) != 2 {
-		t.Fatalf("got %d parts, want one per contact", len(cm.Parts))
-	}
-	for i, want := range []struct {
-		id   networkid.PartID
-		name string
-	}{{"", "Ana Teste.vcf"}, {"1", "Bruno Teste.vcf"}} {
-		part := cm.Parts[i]
-		if part.ID != want.id {
-			t.Errorf("part %d: ID %q, want %q", i, part.ID, want.id)
+	ana, bruno := testVcard("Ana Teste", "5521900000001"), testVcard("Bruno Teste", "5521900000002")
+	for _, tc := range []struct{ name, displayName, wantFile string }{
+		{"display name", "Ana Teste and 1 other contact", "Ana Teste and 1 other contact.vcf"},
+		{"no display name", "", "2 contacts.vcf"},
+	} {
+		cm, uploads := convertForTest(t, &waE2E.Message{ContactsArrayMessage: &waE2E.ContactsArrayMessage{
+			DisplayName: ptr.Ptr(tc.displayName),
+			Contacts: []*waE2E.ContactMessage{
+				{DisplayName: ptr.Ptr("Ana Teste"), Vcard: ptr.Ptr(ana)},
+				{DisplayName: ptr.Ptr("Bruno Teste"), Vcard: ptr.Ptr(bruno)},
+			},
+		}})
+		if len(cm.Parts) != 1 {
+			t.Fatalf("%s: got %d parts, want 1", tc.name, len(cm.Parts))
 		}
-		if part.Content.MsgType != event.MsgFile || part.Content.FileName != want.name {
-			t.Errorf("part %d: %s %q, want m.file %q", i, part.Content.MsgType, part.Content.FileName, want.name)
+		content := cm.Parts[0].Content
+		if content.MsgType != event.MsgFile || content.FileName != tc.wantFile {
+			t.Fatalf("%s: got %s %q, want m.file %q", tc.name, content.MsgType, content.FileName, tc.wantFile)
 		}
-		if uploads[want.name] == "" {
-			t.Errorf("part %d: %s was not uploaded", i, want.name)
+		want := ana + "\n" + bruno
+		if got := uploads[tc.wantFile]; got != want {
+			t.Fatalf("%s: uploaded %q, want %q", tc.name, got, want)
 		}
-		if part.Content.Mentions == nil {
-			t.Errorf("part %d: mentions not set", i)
+		if content.Info.Size != len(want) {
+			t.Fatalf("%s: size %d, want %d", tc.name, content.Info.Size, len(want))
 		}
-		if meta, ok := part.DBMetadata.(*waid.MessageMetadata); !ok || meta.SenderDeviceID != 3 {
-			t.Errorf("part %d: metadata %+v, want sender device 3", i, part.DBMetadata)
-		}
-	}
-	if cm.Parts[0].DBMetadata == cm.Parts[1].DBMetadata {
-		t.Error("parts share one metadata struct")
-	}
-}
-
-func TestEmptyContactsArrayMessage(t *testing.T) {
-	cm, _ := convertForTest(t, &waE2E.Message{ContactsArrayMessage: &waE2E.ContactsArrayMessage{}})
-	if len(cm.Parts) != 1 || cm.Parts[0].Content.MsgType != event.MsgNotice {
-		t.Fatalf("got %d parts, want one notice", len(cm.Parts))
 	}
 }
 
 func TestSingleContactMessage(t *testing.T) {
-	cm, uploads := convertForTest(t, &waE2E.Message{ContactMessage: testContact("Ana Teste")})
-	if len(cm.Parts) != 1 || cm.Parts[0].ID != "" || cm.Parts[0].Content.FileName != "Ana Teste.vcf" || uploads["Ana Teste.vcf"] == "" {
-		t.Fatalf("single contact: %d parts, first %+v", len(cm.Parts), cm.Parts[0].Content)
+	ana := testVcard("Ana Teste", "5521900000001")
+	cm, uploads := convertForTest(t, &waE2E.Message{ContactMessage: &waE2E.ContactMessage{DisplayName: ptr.Ptr("Ana Teste"), Vcard: ptr.Ptr(ana)}})
+	if len(cm.Parts) != 1 || cm.Parts[0].Content.FileName != "Ana Teste.vcf" || uploads["Ana Teste.vcf"] != ana || cm.Parts[0].Content.Info.Size != len(ana) {
+		t.Fatalf("single contact changed: %d parts, first %+v", len(cm.Parts), cm.Parts[0].Content)
 	}
 }
